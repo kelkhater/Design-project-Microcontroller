@@ -1,114 +1,184 @@
+#include "mbed.h"
+#include "SLCD.h"
 #include "keypad.h"
-#include "ThisThread.h"
 
+// Rows
+#define R0 PTC8
+#define R1 PTA5
+#define R2 PTA4
+#define R3 PTA12
 
-// keypad constructor - allows the pins for the rows/columns to be specified
-// notice the information after the single colon. This in member initialisation
-// for objects defined in Keypad.h
-// the keypad constructor is run when an object of this class is created. It performas
-// any setup required
-Keypad::Keypad(PinName row0, 
-               PinName row1, 
-               PinName row2, 
-               PinName row3, 
-               PinName col0, 
-               PinName col1, 
-               PinName col2): _row0(row0), _row1(row1), _row2(row2), _row3(row3), 
-                              _col0(col0), _col1(col1), _col2(col2)
+// Columns
+#define C0 PTD3
+#define C1 PTA2
+#define C2 PTA1
+
+int main()
 {
+    SLCD lcd;
+    Keypad keypad(R0, R1, R2, R3, C0, C1, C2);
 
-    // create a 10ms scanning facility using a thread
-    // the thread keyscan is also defined in Keypad.h
-    // the callback() construct seems odd but is required
-    // to ensure that the function holding the thread is
-    // a function that is part of this specific class and object
-    // KeyScanner scans the keys and assigns the instantaneous 
-    // key press to key
-    keyscan.start(callback(this, &Keypad::KeyScanner));
+    char key;
+    char display_buf[5] = {' ', ' ', ' ', ' ', '\0'};
+    int pos = 0;
 
-    // initialise key to NO_KEY (nothing pressed)
-    key = NO_KEY;
+    const char password[5] = {'1', '2', '3', '4', '\0'};
+    bool password_mode = false;
 
-    // key_p is the value last time you interrogated the keypad
-    key_p = NO_KEY;
-}
+    // pending_special is * || #
+    char pending_special = NO_KEY;
+    auto pending_time = Kernel::Clock::now();
+    const auto COMBO_WINDOW = 500ms;
 
+    auto clear_buffer = [&]() {
+        display_buf[0] = ' ';
+        display_buf[1] = ' ';
+        display_buf[2] = ' ';
+        display_buf[3] = ' ';
+        pos = 0;
+    };
 
-// key scanning thread
-// apply a 0 to one column read all the rows.
-// repeat for all columns
-// very simple - assumes only one key pressed
-// could be improved
-void Keypad::KeyScanner(void)
-{ // use a local variable and only assign key at end
-  char k;
-    // do forever. This to ensure that the thread never finishes
-    while (1==1) {
+    auto refresh_lcd = [&]() {
+        lcd.clear();
+        lcd.Home();
+        lcd.printf("%s", display_buf);
+    };
 
-        // set key to NO_KEY
-        k = NO_KEY;
+    auto show_message = [&](const char *msg, std::chrono::milliseconds t = 1000ms) {
+        lcd.clear();
+        lcd.Home();
+        lcd.printf("%s", msg);
+        ThisThread::sleep_for(t);
+    };
 
-        // left column
-        _col0 = 0; _col1 = 1; _col2 = 1;
-        // read rows
-        if (_row0 == 0) k = mapping[0][0];
-        if (_row1 == 0) k = mapping[0][1];
-        if (_row2 == 0) k = mapping[0][2];
-        if (_row3 == 0) k = mapping[0][3];
+    auto password_correct = [&]() -> bool {
+        if (pos != 4) {
+            return false;
+        }
+        return (display_buf[0] == password[0] &&
+                display_buf[1] == password[1] &&
+                display_buf[2] == password[2] &&
+                display_buf[3] == password[3]);
+    };
 
-        // middle column
-        _col0 = 1; _col1 = 0; _col2 = 1;
-        // read rows
-        if (_row0 == 0) k = mapping[1][0];
-        if (_row1 == 0) k = mapping[1][1];
-        if (_row2 == 0) k = mapping[1][2];
-        if (_row3 == 0) k = mapping[1][3];
+    auto enter_password_mode = [&]() {
+        password_mode = true;
+        clear_buffer();
+        show_message("PASS", 1000ms);
+        lcd.clear();
+        lcd.Home();
+        lcd.printf("    ");
+        printf("Please enter password\n");
+    };
 
-        // right column
-        _col0 = 1; _col1 = 1; _col2 = 0;
-        // read rows
-        if (_row0 == 0) k = mapping[2][0];
-        if (_row1 == 0) k = mapping[2][1];
-        if (_row2 == 0) k = mapping[2][2];
-        if (_row3 == 0) k = mapping[2][3];
+    auto do_confirm = [&]() {
+        if (!password_mode) {
+            printf("Not in password mode\n");
+            return;
+        }
 
-        // finally assign k to key - if no key press found
-        // it will be NO_KEY
-        // this seems unnecessary but we cannto be sure that the function
-        // will run without being interrupted by another thread and if this 
-        // were to happen then intermediate values (such as when  k = NO_KEY)
-        // might be seen elsewhere in the program. This is a fundamental problem
-        // of interrupt and normal code sharing/manipulating the same data - 
-        // access needs to be controlled carefully. The word is 'atomic'
-        key = k;
+        if (password_correct()) {
+            printf("Password correct\n");
+            show_message("DONE", 1000ms);
+        } else {
+            printf("Password wrong\n");
+            show_message("ERR ", 1000ms);
+        }
 
-        // go to sleep for 10ms then loop back and read the keys again
-        // 10ms is a sweet spot: it's short enough so a uset thinks the 
-        // response is instantaneous but longer than the key bounce period
-        // so we should not encounter any issues there
-        ThisThread::sleep_for(10ms);
+        clear_buffer();
+        password_mode = false;
+        lcd.clear();
+        lcd.Home();
+        lcd.printf("    ");
+    };
+
+    auto do_clear = [&]() {
+        clear_buffer();
+        refresh_lcd();
+        printf("Clear\n");
+    };
+
+    lcd.clear();
+    lcd.Home();
+    lcd.printf("    ");
+
+    printf("Password system started\n");
+
+    while (true) {
+        // If * or # was pressed earlier but no combination was completed
+        // within the time window, treat it as a single key action
+        if (pending_special != NO_KEY &&
+            (Kernel::Clock::now() - pending_time >= COMBO_WINDOW)) {
+
+            if (pending_special == '*') {
+                do_confirm();
+            } else if (pending_special == '#') {
+                if (password_mode) {
+                    do_clear();
+                } else {
+                    printf("Clear ignored (not in password mode)\n");
+                }
+            }
+
+            pending_special = NO_KEY;
+        }
+
+        key = keypad.ReadKey();
+
+        if (key != NO_KEY) {
+
+            // If a normal digit arrives while a special key is still pending,
+            // process the pending special key first as a single-key action
+            if (pending_special != NO_KEY && key != '*' && key != '#') {
+                if (pending_special == '*') {
+                    do_confirm();
+                } else if (pending_special == '#') {
+                    if (password_mode) {
+                        do_clear();
+                    }
+                }
+                pending_special = NO_KEY;
+            }
+
+            // Handle * and # combination logic
+            if (key == '*' || key == '#') {
+                if (pending_special != NO_KEY &&
+                    key != pending_special &&
+                    (Kernel::Clock::now() - pending_time <= COMBO_WINDOW)) {
+
+                    pending_special = NO_KEY;
+                    // Valid key combination detected: enter password mode
+                    // Prevent duplicate entry
+                    if(!password_mode){
+                        enter_password_mode();
+                    }
+                } else {
+                    // Store the special key temporarily and wait for a possible combination
+                    pending_special = key;
+                    pending_time = Kernel::Clock::now();
+                }
+            }
+
+            // Handle normal digit input
+            else if (key >= '0' && key <= '9') {
+                if (!password_mode) {
+                    printf("Ignored key %c (not in password mode)\n", key);
+                } else {
+                    // If already full, clear the previous 4 digits
+                    // and start again with the new digit
+                    if (pos >= 4) {
+                        clear_buffer();
+                    }
+
+                    display_buf[pos] = key;
+                    pos++;
+
+                    refresh_lcd();
+                    printf("Key pressed: %c\n", key);
+                }
+            }
+        }
+
+        ThisThread::sleep_for(20ms); 
     }
-}
-
-// uses current value of key to determine if key pressed
-// this is the only puplic function of the class and the 
-// only one that can be used - everything else happens under
-// the hood
-char Keypad::ReadKey(void)
-{
-    // only do something if the current value of the key
-    // is different to the last time this function was called
-    // this is the instant a key is pressed or de-pressed
-    if (key != key_p) {
-
-        // update the previous key value (for next time)
-        key_p = key;
-
-        // return key - the only time a value other than NO_KEY
-        // is returned is when a key has just been pressed
-        return key;
-    }
-
-    // by default return NO_KEY
-    return NO_KEY;
 }
